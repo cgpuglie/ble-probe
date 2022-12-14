@@ -1,0 +1,15 @@
+{
+  "name": "ble-probe",
+  "version": "1.0.0",
+  "description": "NodeJS project to connect to a temperature probe with BLE and read the temperature data.",
+  "main": "index.js",
+  "dependencies": {
+    "node-ble": "^1.9.0"
+  },
+  "devDependencies": {},
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC"
+}
