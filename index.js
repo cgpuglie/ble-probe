@@ -1,15 +1,28 @@
 const { createBluetooth } = require('node-ble')
 const { bluetooth, destroy } = createBluetooth()
+
 const { 
     logLevel, initialSleep, loopSleep,
     serviceId, characteristicId,
-    deviceAliasPattern
+    deviceAliasPattern, deviceNames
 } = require('./config.js')
 
 const log = require('loglevel')
 log.setLevel(logLevel)
 
+// pattern used to match device alias
 const pattern = new RegExp(deviceAliasPattern)
+
+// expose prometheus endpoint
+const client = require('prom-client');
+const collectDefaultMetrics = client.collectDefaultMetrics;
+const Registry = client.Registry;
+const register = new Registry();
+collectDefaultMetrics({ register });
+
+// custom metric for number of probes connected
+const numConnected = new client.Gauge({ name: 'probes_connected', help: 'Num of probes currently connected' });
+numConnected.set(0) //initially nothing connected
 
 async function timeOut(interval) {
     return new Promise((resolve) => {
@@ -21,10 +34,20 @@ async function timeOut(interval) {
 
 function format(any) {
     let base = { timestamp: (new Date()).toISOString(), message: "" }
-    return JSON.stringify(Object.assign({}, any, base))
+    return JSON.stringify(Object.assign({}, base, any))
 }
 
+// id => bool, should probe be skipped?
 let skip = {}
+// id => bool, is probe connected to?
+let connected = {}
+// id, list of connected ids
+let deviceIdList = []
+// name, list of names in order by how they are assigned
+let deviceNameList = deviceNames.split(',')
+// id => probe value, used for metric collection
+let values = {}
+
 async function main() {
     const adapter = await bluetooth.defaultAdapter()
 
@@ -35,7 +58,7 @@ async function main() {
 
     // Handle ctrl+c
     process.on('SIGINT', function() {
-        log.info(format({ message: "caught SIGINT, shutting down..." }))
+        console.log(format({ message: "caught SIGINT, shutting down..." }))
         adapter.stopDiscovery().then(() => {
             destroy()
             process.exit();
@@ -46,22 +69,18 @@ async function main() {
     log.trace(format({ sleep: initialSleep }))
     await timeOut(initialSleep)
 
-    const deviceIds = await adapter.devices()
+    let deviceIds = await adapter.devices()
+    deviceIds = deviceIds.sort() // connect in the same order each time
     log.trace(format({ discovered: deviceIds }))
 
     // Continuously attempt connections
     while (true) {
         for (let i = 0; i < deviceIds.length; i++) {
-            if (Object.keys(skip).length == deviceIds.length) {
-                // all IDs are either connected or don't match
-                break
-            }
-
             const id = deviceIds[i]
             log.trace(format({checking: id, index: i}))
 
             // skip if marked as connected or ignored
-            if (skip[id]) {
+            if (skip[id] || connected[id]) {
                 log.trace(format({ skipped: true, id: id }))
                 continue
             }
@@ -84,25 +103,60 @@ async function main() {
             }
 
             log.info(format({ connecting: id }))
-            // create events
-            await device.on('connected', (_) => {
-                log.info(format({connected: id}))
-            })
-            await device.on('disconnect', (_) => {
-                log.info(format({ disconnected: id }))
-            })
+            
+            // only do this on first connect
+            let firstConnect = (connected[id] == null)
+            if (firstConnect) {
+                // create events
+                await device.on('connected', (_) => {
+                    log.info(format({id, connected: connected[id]}))
+                })
+                await device.on('disconnect', (_) => {
+                    connected[id] = false
+                    numConnected.dec()
+                    log.info(format({ id, connected: connected[id] }))
+                })
+            }
 
             try {
                 await device.connect()
                 // mark as connected
-                skip[id] = true
+                connected[id] = true
+                numConnected.inc()
+                
+                // look up name for current probe
+                deviceIdList.push(id)
+                let nameIndex = deviceIdList.indexOf(id)
+                let deviceName = deviceNameList[nameIndex]
 
-                const gatt = await device.gatt()
-                const service = await gatt.getPrimaryService(serviceId)
-                const characteristic = await service.getCharacteristic(characteristicId)
+                if (firstConnect) {
+                    const gatt = await device.gatt()
+                    const service = await gatt.getPrimaryService(serviceId)
+                    const characteristic = await service.getCharacteristic(characteristicId)
 
-                await characteristic.startNotifications()
-                characteristic.on('valuechanged', createHandler(id))
+                    await characteristic.startNotifications()
+                    characteristic.on('valuechanged', function handler(buffer) {
+                        try {
+                            let cel = Number(buffer.toString().substr(1)) // remove d prefix, starts as a decimal format string
+                            let f = (cel * 1.8) + 32 // convert to farenheight
+                            
+                            log.info({id, deviceName, value: f})
+                            values[id] = f
+                        }
+                        catch (e) {
+                            log.error({message: `failed to parse value '${buffer.toString()}'`, error: e})
+                        }
+                    })
+
+                    // collect probe data as a custom metric
+                    new client.Gauge({
+                        name: `${deviceName}_temperature`,
+                        help: `Current probe temperature value for '${id}'`,
+                        collect() {
+                            this.set(values[id]);
+                        },
+                    });
+                }
             }
             catch (e) {
                 log.error({message: `connection attempt to device '${id}' failed.`, error: e})
@@ -112,12 +166,6 @@ async function main() {
         
         log.trace(format({ sleep: loopSleep }))
         await timeOut(loopSleep)
-    }
-}
-
-function createHandler(id) {
-    return function handler(buffer) {
-        log.info({id, value: buffer.toString()})
     }
 }
 
