@@ -4,6 +4,7 @@
   "description": "NodeJS project to connect to a temperature probe with BLE and read the temperature data.",
   "main": "index.js",
   "dependencies": {
+    "express": "^4.18.2",
     "loglevel": "^1.8.1",
     "node-ble": "^1.9.0",
     "prom-client": "^14.1.0"

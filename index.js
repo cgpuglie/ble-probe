@@ -1,10 +1,13 @@
 const { createBluetooth } = require('node-ble')
 const { bluetooth, destroy } = createBluetooth()
+const express = require('express');
+const server = express();
 
 const { 
     logLevel, initialSleep, loopSleep,
     serviceId, characteristicId,
-    deviceAliasPattern, deviceNames
+    deviceAliasPattern, deviceNames,
+    metricsPort
 } = require('./config.js')
 
 const log = require('loglevel')
@@ -14,11 +17,9 @@ log.setLevel(logLevel)
 const pattern = new RegExp(deviceAliasPattern)
 
 // expose prometheus endpoint
-const client = require('prom-client');
-const collectDefaultMetrics = client.collectDefaultMetrics;
-const Registry = client.Registry;
-const register = new Registry();
-collectDefaultMetrics({ register });
+const client = require('prom-client')
+const collectDefaultMetrics = client.collectDefaultMetrics
+collectDefaultMetrics()
 
 // custom metric for number of probes connected
 const numConnected = new client.Gauge({ name: 'probes_connected', help: 'Num of probes currently connected' });
@@ -64,6 +65,18 @@ async function main() {
             process.exit();
         })
     });
+
+    // serve metrics endpoint
+    server.get('/metrics', async (_, res) => {
+        try {
+            res.set('Content-Type', client.register.contentType);
+            res.end(await client.register.metrics());
+        } catch (ex) {
+            res.status(500).end(ex);
+        }
+    });
+
+    server.listen(metricsPort)
 
     // wait for devices
     log.trace(format({ sleep: initialSleep }))
